@@ -1,4 +1,4 @@
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import { TOPICS, MAX_DAYS_AHEAD, slotLabel, istToday, addDays, slotsFor } from "@/lib/booking";
 
 export const runtime = "nodejs";
@@ -34,35 +34,47 @@ export async function POST(req) {
     `Topic: ${topic}`, `Preferred time: ${when}`, "", "What they want to improve:", message || "-",
   ].join("\n");
 
-  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, BOOKING_TO, BOOKING_FROM } = process.env;
-  if (!SMTP_HOST || !BOOKING_TO) {
-    console.error("Email not configured: set SMTP_HOST, SMTP_USER, SMTP_PASS and BOOKING_TO.");
+  const { RESEND_API_KEY, RESEND_FROM, BOOKING_TO } = process.env;
+  if (!RESEND_API_KEY || !BOOKING_TO) {
+    console.error("Email not configured: set RESEND_API_KEY and BOOKING_TO.");
     return Response.json({ error: "Booking is temporarily unavailable. Please email us directly." }, { status: 500 });
   }
 
-  const port = Number(SMTP_PORT || 587);
-  const transport = nodemailer.createTransport({
-    host: SMTP_HOST, port, secure: port === 465,
-    auth: SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
-  });
-  const from = BOOKING_FROM || SMTP_USER;
+  const bookingRecipients = BOOKING_TO.split(",").map((address) => address.trim()).filter(Boolean);
+  if (!bookingRecipients.length) {
+    console.error("Email not configured: BOOKING_TO has no valid recipients.");
+    return Response.json({ error: "Booking is temporarily unavailable. Please email us directly." }, { status: 500 });
+  }
+
+  const resend = new Resend(RESEND_API_KEY);
+  const from = RESEND_FROM || "Stellar Solutions <onboarding@resend.dev>";
 
   try {
-    await transport.sendMail({
-      from, to: BOOKING_TO, replyTo: email,
+    const notification = await resend.emails.send({
+      from,
+      to: bookingRecipients,
+      replyTo: email,
       subject: `New call request: ${name}, ${date} ${slotLabel(time)} IST`,
       text: details,
     });
+
+    if (notification.error) {
+      console.error("Resend notification error:", notification.error);
+      return Response.json({ error: "We could not send your request. Please email us directly." }, { status: 502 });
+    }
   } catch (e) {
     console.error("Booking email failed:", e);
-    return Response.json({ error: "We could not send your request. Please email us directly." }, { status: 500 });
+    return Response.json({ error: "We could not send your request. Please email us directly." }, { status: 502 });
   }
 
   // Confirmation to the visitor. A failure here does not fail the booking.
-  transport.sendMail({
-    from, to: email,
+  resend.emails.send({
+    from,
+    to: email,
     subject: "We received your call request",
     text: `Hi ${name},\n\nThanks for reaching out. We received your request for a free 30-minute call on ${when}. We will confirm the slot by email within one business day.\n\nYour details:\n${details}\n\nIf you need to change the time, just reply to this email.`,
+  }).then((confirmation) => {
+    if (confirmation.error) console.error("Resend confirmation error:", confirmation.error);
   }).catch((e) => console.error("Confirmation email failed:", e));
 
   return Response.json({ ok: true });
